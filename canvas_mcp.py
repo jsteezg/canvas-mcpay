@@ -14,7 +14,7 @@ CANVAS_BASE = "https://csulb.instructure.com/api/v1"
 TOKEN = os.environ.get("CANVAS_TOKEN", "21139~ekkazRPUMrDBRt46Phy6JyXL6UDnfrxBu7ZnnN6Rz2MCRYDTVTYt8QfcnmHWvhYM")
 PORT = int(os.environ.get("PORT", 8000))
 
-mcp = FastMCP("Canvas")
+mcp = FastMCP("Canvas", host="0.0.0.0", port=PORT)
 
 
 def _get(path: str, params: dict = None) -> list | dict:
@@ -137,4 +137,4 @@ def get_courses() -> str:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="0.0.0.0", port=PORT)
+        mcp.run(transport="sse")
