@@ -2,14 +2,14 @@
 Canvas LMS MCP Server — Remote/Cloud version (SSE transport)
 Exposes Canvas API as tools usable in any Claude session.
 """
-
 import os
 import json
 import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────────────────────
 CANVAS_BASE = "https://csulb.instructure.com/api/v1"
 TOKEN = os.environ.get("CANVAS_TOKEN", "21139~ekkazRPUMrDBRt46Phy6JyXL6UDnfrxBu7ZnnN6Rz2MCRYDTVTYt8QfcnmHWvhYM")
 PORT = int(os.environ.get("PORT", 8000))
@@ -27,7 +27,24 @@ def _get(path: str, params: dict = None) -> list | dict:
         return json.loads(resp.read().decode())
 
 
-import urllib.parse
+def _get_all(path: str, params: dict = None) -> list:
+    """Fetch all pages from a paginated Canvas endpoint."""
+    params = dict(params or {})
+    params.setdefault("per_page", "100")
+    url = f"{CANVAS_BASE}{path}"
+    query = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items())
+    url = f"{url}?{query}"
+    results = []
+    while url:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            results.extend(json.loads(resp.read().decode()))
+            link = resp.headers.get("Link", "")
+            url = None
+            for part in link.split(","):
+                if 'rel="next"' in part:
+                    url = part.split(";")[0].strip().strip("<>")
+    return results
 
 
 @mcp.tool()
@@ -74,8 +91,8 @@ def get_upcoming_assignments(days: int = 7) -> str:
 
 @mcp.tool()
 def get_missing_assignments() -> str:
-    """Get all missing or unsubmitted assignments."""
-    start = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    """Get all missing or unsubmitted assignments (looks back 90 days)."""
+    start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
     end = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     items = _get("/planner/items", {"start_date": start, "end_date": end, "per_page": "100"})
     missing = []
@@ -130,11 +147,120 @@ def get_announcements() -> str:
 
 @mcp.tool()
 def get_courses() -> str:
-    """List all active enrolled courses."""
+    """List all active enrolled courses with their IDs."""
     courses = _get("/courses", {"enrollment_state": "active", "per_page": "20"})
-    lines = [f"ID {c.get('id')} — {c.get('name', 'Unknown')} ({c.get('course_code', '')})" for c in courses]
+    lines = [f"ID {c.get('id')} — {c.get('name', 'Unknown')} ({c.get('course_code', '')})"
+             for c in courses]
     return "\n".join(lines) if lines else "No active courses found."
 
 
+@mcp.tool()
+def get_modules(course_id: int) -> str:
+    """Get all modules and their items for a course. Use get_courses first to find the course ID."""
+    modules = _get_all(f"/courses/{course_id}/modules", {"include[]": "items"})
+    if not modules:
+        return f"No modules found for course {course_id}."
+    lines = []
+    for mod in modules:
+        lines.append(f"\n📦 {mod.get('name', 'Unnamed')} (items: {mod.get('items_count', 0)})")
+        for item in mod.get("items", []):
+            title = item.get("title", "Untitled")
+            kind = item.get("type", "")
+            content_id = item.get("content_id", "")
+            lines.append(f"  • [{kind}] {title}" + (f" (id:{content_id})" if content_id else ""))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_course_assignments(course_id: int) -> str:
+    """Get all assignments for a course with scores and submission status. Shows late flags."""
+    assignments = _get_all(
+        f"/courses/{course_id}/assignments",
+        {"include[]": "submission", "order_by": "due_at"}
+    )
+    if not assignments:
+        return f"No assignments found for course {course_id}."
+    lines = []
+    for a in assignments:
+        title = a.get("name", "Untitled")
+        due = (a.get("due_at") or "")[:10] or "no due date"
+        pts = a.get("points_possible", "?")
+        sub = a.get("submission", {}) or {}
+        state = sub.get("workflow_state", "unsubmitted")
+        score = sub.get("score")
+        late = sub.get("late", False)
+        missing = sub.get("missing", False)
+
+        if state == "graded":
+            flag = f"✅ {score}/{pts}"
+            if late:
+                flag += " ⚠️ LATE"
+        elif state == "submitted":
+            flag = "📬 submitted"
+            if late:
+                flag += " ⚠️ LATE"
+        elif missing:
+            flag = "🔴 MISSING"
+        else:
+            flag = "⬜ not submitted"
+
+        lines.append(f"[{due}] {title} — {flag}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_submission(course_id: int, assignment_id: int) -> str:
+    """Get detailed submission info for a specific assignment including late penalty."""
+    sub = _get(f"/courses/{course_id}/assignments/{assignment_id}/submissions/self",
+               {"include[]": "submission_comments"})
+    if not sub:
+        return "No submission found."
+    state = sub.get("workflow_state", "unknown")
+    score = sub.get("score")
+    late = sub.get("late", False)
+    missing = sub.get("missing", False)
+    submitted_at = (sub.get("submitted_at") or "")[:16]
+    graded_at = (sub.get("graded_at") or "")[:16]
+    late_policy = sub.get("points_deducted")
+
+    lines = [
+        f"State: {state}",
+        f"Submitted: {submitted_at or 'not submitted'}",
+        f"Late: {'Yes' if late else 'No'}",
+        f"Missing: {'Yes' if missing else 'No'}",
+        f"Score: {score} pts" if score is not None else "Score: not graded",
+        f"Graded at: {graded_at or 'not graded'}",
+    ]
+    if late_policy:
+        lines.append(f"Points deducted (late penalty): {late_policy}")
+
+    comments = sub.get("submission_comments", [])
+    if comments:
+        lines.append("\nComments:")
+        for c in comments:
+            author = c.get("author", {}).get("display_name", "?")
+            body = c.get("comment", "")[:200]
+            lines.append(f"  {author}: {body}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_course_announcements(course_id: int, count: int = 10) -> str:
+    """Get announcements for a specific course."""
+    announcements = _get("/announcements", {
+        "context_codes[0]": f"course_{course_id}",
+        "per_page": str(count)
+    })
+    if not announcements:
+        return f"No announcements for course {course_id}."
+    lines = []
+    for a in announcements:
+        title = a.get("title", "No title")
+        posted = (a.get("posted_at") or "")[:10]
+        lines.append(f"[{posted}] {title}")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
-        mcp.run(transport="sse")
+    mcp.run(transport="sse")
