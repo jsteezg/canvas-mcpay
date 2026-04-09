@@ -173,7 +173,7 @@ def get_modules(course_id: int) -> str:
 
 @mcp.tool()
 def get_course_assignments(course_id: int) -> str:
-    """Get all assignments for a course with scores and submission status. Shows late flags."""
+    """Get all assignments for a course with assignment IDs, scores, and submission status."""
     assignments = _get_all(
         f"/courses/{course_id}/assignments",
         {"include[]": "submission", "order_by": "due_at"}
@@ -182,6 +182,7 @@ def get_course_assignments(course_id: int) -> str:
         return f"No assignments found for course {course_id}."
     lines = []
     for a in assignments:
+        aid = a.get("id", "?")
         title = a.get("name", "Untitled")
         due = (a.get("due_at") or "")[:10] or "no due date"
         pts = a.get("points_possible", "?")
@@ -204,7 +205,7 @@ def get_course_assignments(course_id: int) -> str:
         else:
             flag = "⬜ not submitted"
 
-        lines.append(f"[{due}] {title} — {flag}")
+        lines.append(f"[{due}] (id:{aid}) {title} — {flag}")
     return "\n".join(lines)
 
 
