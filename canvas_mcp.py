@@ -8,7 +8,7 @@ import json
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 CANVAS_BASE = "https://csulb.instructure.com/api/v1"
 TOKEN = os.environ.get("CANVAS_TOKEN", "21139~ekkazRPUMrDBRt46Phy6JyXL6UDnfrxBu7ZnnN6Rz2MCRYDTVTYt8QfcnmHWvhYM")
@@ -176,7 +176,7 @@ def get_modules(course_id: int) -> str:
     for m in modules:
         lines.append(f"\n## {m.get('name', '?')}")
         for item in m.get("items", []):
-            lines.append(f"  - [{item.get('type', '?')}] {item.get('title', '?')}")
+            lines.append(f"  - [{item.get('type', '?')}] (id:{item.get('content_id', item.get('id', '?'))}) {item.get('title', '?')}")
     return "\n".join(lines)
 
 
@@ -280,17 +280,51 @@ def get_announcement_detail(course_id: int, announcement_id: int) -> str:
 
 
 @mcp.tool()
-def get_submission_file(course_id: int, assignment_id: int) -> str:
-    """Download and return text content of submitted files for an assignment (up to 3000 chars per file)."""
+def get_discussion_entries(course_id: int, topic_id: int) -> str:
+    """Get all posts and replies in a Canvas discussion topic (e.g. Research Journal)."""
+    entries = _get(
+        f"/courses/{course_id}/discussion_topics/{topic_id}/entries",
+        {"per_page": "50"}
+    )
+    if not entries or isinstance(entries, dict):
+        return f"No entries found for discussion topic {topic_id} in course {course_id}."
+    lines = []
+    for e in entries:
+        author = e.get("user_name") or (e.get("author") or {}).get("display_name", "Unknown")
+        created = (e.get("created_at") or "?")[:10]
+        msg = re.sub(r'<[^>]+>', ' ', e.get("message", "")).strip()
+        msg = ' '.join(msg.split())
+        lines.append(f"[{created}] {author}:\n  {msg}")
+        replies = e.get("recent_replies") or []
+        if not replies:
+            try:
+                replies = _get(
+                    f"/courses/{course_id}/discussion_topics/{topic_id}/entries/{e['id']}/replies",
+                    {"per_page": "20"}
+                ) or []
+            except Exception:
+                pass
+        for r in replies:
+            r_author = r.get("user_name") or (r.get("author") or {}).get("display_name", "?")
+            r_created = (r.get("created_at") or "?")[:10]
+            r_msg = re.sub(r'<[^>]+>', ' ', r.get("message", "")).strip()
+            r_msg = ' '.join(r_msg.split())[:600]
+            lines.append(f"  \u21b3 [{r_created}] {r_author}: {r_msg}")
+    return "\n\n".join(lines) if lines else "Discussion topic is empty."
+
+
+@mcp.tool()
+def get_submission_file(course_id: int, assignment_id: int) -> list:
+    """Download submitted files. Text files returned as text; PDFs rendered as images so scanned pages are visible (up to 5 pages)."""
     sub = _get(
         f"/courses/{course_id}/assignments/{assignment_id}/submissions/self",
         {"include[]": "submission_comments"}
     )
     if not sub or isinstance(sub, list):
-        return "Submission not found."
+        return ["Submission not found."]
     attachments = sub.get("attachments", [])
     if not attachments:
-        return "No file attachments found in this submission."
+        return ["No file attachments found in this submission."]
     results = []
     for att in attachments:
         filename = att.get("filename", "unknown")
@@ -300,16 +334,34 @@ def get_submission_file(course_id: int, assignment_id: int) -> str:
             continue
         try:
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = resp.read(3000)
-            try:
-                text = raw.decode("utf-8", errors="replace")
-            except Exception:
-                text = "(binary file, cannot display as text)"
-            results.append(f"--- {filename} ---\n{text[:3000]}")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+            is_pdf = filename.lower().endswith(".pdf") or raw[:4] == b"%PDF"
+            if is_pdf:
+                try:
+                    import fitz
+                    doc = fitz.open(stream=raw, filetype="pdf")
+                    page_count = len(doc)
+                    full_text = "".join(page.get_text() for page in doc).strip()
+                    if full_text:
+                        results.append(f"--- {filename} (text PDF, {page_count} pages) ---\n{full_text[:6000]}")
+                    else:
+                        results.append(f"--- {filename} (scanned PDF, {page_count} pages — rendering pages as images) ---")
+                        for i in range(min(page_count, 5)):
+                            pix = doc[i].get_pixmap(matrix=fitz.Matrix(2, 2))
+                            results.append(Image(data=pix.tobytes("png"), media_type="image/png"))
+                    doc.close()
+                except Exception as e:
+                    results.append(f"--- {filename} (PDF, could not render: {e}) ---")
+            else:
+                try:
+                    text = raw.decode("utf-8", errors="replace")
+                except Exception:
+                    text = "(binary file, cannot display as text)"
+                results.append(f"--- {filename} ---\n{text[:3000]}")
         except Exception as e:
             results.append(f"--- {filename} ---\n(error downloading: {e})")
-    return "\n\n".join(results)
+    return results
 
 
 if __name__ == "__main__":
