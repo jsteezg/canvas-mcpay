@@ -3,6 +3,7 @@ Canvas LMS MCP Server - Remote/Cloud version (SSE transport)
 Exposes Canvas API as tools usable in any Claude session.
 """
 import os
+import re
 import json
 import urllib.request
 import urllib.parse
@@ -142,7 +143,7 @@ def get_grades() -> str:
 
 @mcp.tool()
 def get_announcements() -> str:
-    """Get recent announcements from all active courses (auto-updates each semester)."""
+    """Get recent announcements with full message text from all active courses."""
     course_ids = _active_course_ids()
     if not course_ids:
         return "No active courses found."
@@ -157,7 +158,11 @@ def get_announcements() -> str:
         title = a.get("title", "?")
         posted = (a.get("posted_at") or "?")[:10]
         context = a.get("context_name") or a.get("context_code", "?")
+        msg = re.sub(r'<[^>]+>', ' ', a.get("message", "")).strip()
+        msg = ' '.join(msg.split())[:500]
         lines.append(f"[{posted}] {context}: {title}")
+        if msg:
+            lines.append(f"  > {msg}")
     return "\n".join(lines)
 
 
@@ -242,7 +247,7 @@ def get_submission(course_id: int, assignment_id: int) -> str:
 
 @mcp.tool()
 def get_course_announcements(course_id: int, count: int = 10) -> str:
-    """Get recent announcements for a specific course."""
+    """Get recent announcements with full message text for a specific course."""
     announcements = _get(
         f"/courses/{course_id}/discussion_topics",
         {"only_announcements": "true", "per_page": str(count), "order_by": "posted_at"}
@@ -253,7 +258,11 @@ def get_course_announcements(course_id: int, count: int = 10) -> str:
     for a in announcements:
         title = a.get("title", "?")
         posted = (a.get("posted_at") or "?")[:10]
+        msg = re.sub(r'<[^>]+>', ' ', a.get("message", "")).strip()
+        msg = ' '.join(msg.split())[:600]
         lines.append(f"[{posted}] {title}")
+        if msg:
+            lines.append(f"  > {msg}")
     return "\n".join(lines)
 
 
