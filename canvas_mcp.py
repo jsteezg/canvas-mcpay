@@ -266,5 +266,51 @@ def get_course_announcements(course_id: int, count: int = 10) -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+def get_announcement_detail(course_id: int, announcement_id: int) -> str:
+    """Get the full body text of a specific announcement by its ID."""
+    data = _get(f"/courses/{course_id}/discussion_topics/{announcement_id}", {})
+    if not data or isinstance(data, list):
+        return "Announcement not found."
+    title = data.get("title", "?")
+    posted = (data.get("posted_at") or "?")[:10]
+    msg = re.sub(r'<[^>]+>', ' ', data.get("message", "")).strip()
+    msg = ' '.join(msg.split())
+    return f"[{posted}] {title}\n\n{msg}"
+
+
+@mcp.tool()
+def get_submission_file(course_id: int, assignment_id: int) -> str:
+    """Download and return text content of submitted files for an assignment (up to 3000 chars per file)."""
+    sub = _get(
+        f"/courses/{course_id}/assignments/{assignment_id}/submissions/self",
+        {"include[]": "submission_comments"}
+    )
+    if not sub or isinstance(sub, list):
+        return "Submission not found."
+    attachments = sub.get("attachments", [])
+    if not attachments:
+        return "No file attachments found in this submission."
+    results = []
+    for att in attachments:
+        filename = att.get("filename", "unknown")
+        url = att.get("url", "")
+        if not url:
+            results.append(f"--- {filename} ---\n(no download URL)")
+            continue
+        try:
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read(3000)
+            try:
+                text = raw.decode("utf-8", errors="replace")
+            except Exception:
+                text = "(binary file, cannot display as text)"
+            results.append(f"--- {filename} ---\n{text[:3000]}")
+        except Exception as e:
+            results.append(f"--- {filename} ---\n(error downloading: {e})")
+    return "\n\n".join(results)
+
+
 if __name__ == "__main__":
     mcp.run(transport="sse")
